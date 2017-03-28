@@ -1,6 +1,13 @@
-# LLVM-openmp branch towards_tr4
+# LLVM-openmp branch tr4-stable
 
 LLVM/OpenMP runtime with changes towards TR4 compliance regarding OMPT
+
+# THIS BRANCH IS SUBJECT TO HISTORY REWRITES (REBASE)
+This branch is intended to be used for referencing in a tool build, 
+as we try to only push broadly tested commits to this branch.
+
+For stability, this branch has codeptr_ra disabled!
+
 
 # Reference tool
 For reference of the currently implemented OMPT API please check [callback.h](runtime/test/ompt/callback.h),
