@@ -147,9 +147,9 @@
 # define KMP_UINT64_SPEC     "llu"
 #endif /* KMP_OS_UNIX */
 
-#if KMP_ARCH_X86 || KMP_ARCH_ARM
+#if KMP_ARCH_X86 || KMP_ARCH_ARM || KMP_ARCH_MIPS
 # define KMP_SIZE_T_SPEC KMP_UINT32_SPEC
-#elif KMP_ARCH_X86_64 || KMP_ARCH_PPC64 || KMP_ARCH_AARCH64
+#elif KMP_ARCH_X86_64 || KMP_ARCH_PPC64 || KMP_ARCH_AARCH64 || KMP_ARCH_MIPS64
 # define KMP_SIZE_T_SPEC KMP_UINT64_SPEC
 #else
 # error "Can't determine size_t printf format specifier."
@@ -188,12 +188,7 @@ typedef double  kmp_real64;
     // template for debug prints specification ( d, u, lld, llu ), and to obtain
     // signed/unsigned flavors of a type
     template< typename T >
-    struct traits_t {
-        typedef T           signed_t;
-        typedef T           unsigned_t;
-        typedef T           floating_t;
-        static char const * spec;
-    };
+    struct traits_t { };
     // int
     template<>
     struct traits_t< signed int > {
@@ -201,6 +196,9 @@ typedef double  kmp_real64;
         typedef unsigned int  unsigned_t;
         typedef double        floating_t;
         static char const *   spec;
+        static const signed_t max_value = 0x7fffffff;
+        static const signed_t min_value = 0x80000000;
+        static const int type_size = sizeof(signed_t);
     };
     // unsigned int
     template<>
@@ -209,6 +207,9 @@ typedef double  kmp_real64;
         typedef unsigned int  unsigned_t;
         typedef double        floating_t;
         static char const *   spec;
+        static const unsigned_t max_value = 0xffffffff;
+        static const unsigned_t min_value = 0x00000000;
+        static const int type_size = sizeof(unsigned_t);
     };
     // long long
     template<>
@@ -217,6 +218,9 @@ typedef double  kmp_real64;
         typedef unsigned long long  unsigned_t;
         typedef long double         floating_t;
         static char const *         spec;
+        static const signed_t max_value = 0x7fffffffffffffffLL;
+        static const signed_t min_value = 0x8000000000000000LL;
+        static const int type_size = sizeof(signed_t);
     };
     // unsigned long long
     template<>
@@ -225,6 +229,9 @@ typedef double  kmp_real64;
         typedef unsigned long long  unsigned_t;
         typedef long double         floating_t;
         static char const *         spec;
+        static const unsigned_t max_value = 0xffffffffffffffffLL;
+        static const unsigned_t min_value = 0x0000000000000000LL;
+        static const int type_size = sizeof(unsigned_t);
     };
     //-------------------------------------------------------------------------
 #endif // __cplusplus
@@ -236,9 +243,18 @@ typedef double  kmp_real64;
 #endif
 
 #define PAGE_SIZE                       (0x4000)
+
+#if KMP_OS_LINUX
+#define KMP_GET_PAGE_SIZE() getpagesize()
+#else
+// TODO: find the corresponding function to getpagesize() in Windows
+// and use it whenever possible.
+#define KMP_GET_PAGE_SIZE() PAGE_SIZE
+#endif
+
 #define PAGE_ALIGNED(_addr)     ( ! ((size_t) _addr & \
-                                     (size_t)(PAGE_SIZE - 1)))
-#define ALIGN_TO_PAGE(x)   (void *)(((size_t)(x)) & ~((size_t)(PAGE_SIZE - 1)))
+                                     (size_t)(KMP_GET_PAGE_SIZE() - 1)))
+#define ALIGN_TO_PAGE(x)   (void *)(((size_t)(x)) & ~((size_t)(KMP_GET_PAGE_SIZE() - 1)))
 
 /* ---------------------- Support for cache alignment, padding, etc. -----------------*/
 
@@ -550,7 +566,7 @@ extern kmp_real64 __kmp_xchg_real64( volatile kmp_real64 *p, kmp_real64 v );
 # endif
 #endif /* KMP_OS_WINDOWS */
 
-#if KMP_ARCH_PPC64 || KMP_ARCH_ARM || KMP_ARCH_AARCH64
+#if KMP_ARCH_PPC64 || KMP_ARCH_ARM || KMP_ARCH_AARCH64 || KMP_ARCH_MIPS || KMP_ARCH_MIPS64
 # define KMP_MB()       __sync_synchronize()
 #endif
 
@@ -596,8 +612,12 @@ extern kmp_real64 __kmp_xchg_real64( volatile kmp_real64 *p, kmp_real64 v );
 
 #define TCR_4(a)            (a)
 #define TCW_4(a,b)          (a) = (b)
+#define TCI_4(a)            (++(a))
+#define TCD_4(a)            (--(a))
 #define TCR_8(a)            (a)
 #define TCW_8(a,b)          (a) = (b)
+#define TCI_8(a)            (++(a))
+#define TCD_8(a)            (--(a))
 #define TCR_SYNC_4(a)       (a)
 #define TCW_SYNC_4(a,b)     (a) = (b)
 #define TCX_SYNC_4(a,b,c)   KMP_COMPARE_AND_STORE_REL32((volatile kmp_int32 *)(volatile void *)&(a), (kmp_int32)(b), (kmp_int32)(c))
@@ -605,7 +625,7 @@ extern kmp_real64 __kmp_xchg_real64( volatile kmp_real64 *p, kmp_real64 v );
 #define TCW_SYNC_8(a,b)     (a) = (b)
 #define TCX_SYNC_8(a,b,c)   KMP_COMPARE_AND_STORE_REL64((volatile kmp_int64 *)(volatile void *)&(a), (kmp_int64)(b), (kmp_int64)(c))
 
-#if KMP_ARCH_X86
+#if KMP_ARCH_X86 || KMP_ARCH_MIPS
 // What about ARM?
     #define TCR_PTR(a)          ((void *)TCR_4(a))
     #define TCW_PTR(a,b)        TCW_4((a),(b))
@@ -646,6 +666,7 @@ typedef void    (*microtask_t)( int *gtid, int *npr, ... );
 #endif
 
 #define KMP_WAIT_YIELD           __kmp_wait_yield_4
+#define KMP_WAIT_YIELD_PTR       __kmp_wait_yield_4_ptr
 #define KMP_EQ                   __kmp_eq_4
 #define KMP_NEQ                  __kmp_neq_4
 #define KMP_LT                   __kmp_lt_4
@@ -674,7 +695,7 @@ typedef void    (*microtask_t)( int *gtid, int *npr, ... );
 #endif
 
 // Enable dynamic user lock
-#if OMP_41_ENABLED
+#if OMP_45_ENABLED
 # define KMP_USE_DYNAMIC_LOCK 1
 #endif
 

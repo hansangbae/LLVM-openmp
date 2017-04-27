@@ -1,5 +1,5 @@
 /*
- * kmp_sched.c -- static scheduling -- iteration initialization
+ * kmp_sched.cpp -- static scheduling -- iteration initialization
  */
 
 
@@ -33,33 +33,6 @@
 #include "ompt-specific.h"
 #endif
 
-// template for type limits
-template< typename T >
-struct i_maxmin {
-    static const T mx;
-    static const T mn;
-};
-template<>
-struct i_maxmin< int > {
-    static const int mx = 0x7fffffff;
-    static const int mn = 0x80000000;
-};
-template<>
-struct i_maxmin< unsigned int > {
-    static const unsigned int mx = 0xffffffff;
-    static const unsigned int mn = 0x00000000;
-};
-template<>
-struct i_maxmin< long long > {
-    static const long long mx = 0x7fffffffffffffffLL;
-    static const long long mn = 0x8000000000000000LL;
-};
-template<>
-struct i_maxmin< unsigned long long > {
-    static const unsigned long long mx = 0xffffffffffffffffLL;
-    static const unsigned long long mn = 0x0000000000000000LL;
-};
-//-------------------------------------------------------------------------
 #ifdef KMP_DEBUG
 //-------------------------------------------------------------------------
 // template for debug prints specification ( d, u, lld, llu )
@@ -84,7 +57,7 @@ __kmp_for_static_init(
     typename traits_t< T >::signed_t  chunk
 ) {
     KMP_COUNT_BLOCK(OMP_FOR_static);
-    KMP_TIME_BLOCK (FOR_static_scheduling);
+    KMP_TIME_PARTITIONED_BLOCK(FOR_static_scheduling);
 
     typedef typename traits_t< T >::unsigned_t  UT;
     typedef typename traits_t< T >::signed_t    ST;
@@ -97,8 +70,8 @@ __kmp_for_static_init(
     register kmp_info_t *th = __kmp_threads[ gtid ];
 
 #if OMPT_SUPPORT && OMPT_TRACE
-    ompt_team_info_t *team_info = NULL; 
-    ompt_task_info_t *task_info = NULL; 
+    ompt_team_info_t *team_info = NULL;
+    ompt_task_info_t *task_info = NULL;
 
     if (ompt_enabled) {
         // Only fully initialize variables needed by OMPT if OMPT is enabled.
@@ -295,19 +268,20 @@ __kmp_for_static_init(
                     *pupper = *plower + big_chunk_inc_count - incr;
                     if ( incr > 0 ) {
                         if( *pupper < *plower )
-                            *pupper = i_maxmin< T >::mx;
+                            *pupper = traits_t<T>::max_value;
                         if( plastiter != NULL )
                             *plastiter = *plower <= old_upper && *pupper > old_upper - incr;
                         if ( *pupper > old_upper ) *pupper = old_upper; // tracker C73258
                     } else {
                         if( *pupper > *plower )
-                            *pupper = i_maxmin< T >::mn;
+                            *pupper = traits_t<T>::min_value;
                         if( plastiter != NULL )
                             *plastiter = *plower >= old_upper && *pupper < old_upper - incr;
                         if ( *pupper < old_upper ) *pupper = old_upper; // tracker C73258
                     }
                 }
             }
+            *pstride = trip_count;
             break;
         }
     case kmp_sch_static_chunked:
@@ -324,6 +298,29 @@ __kmp_for_static_init(
                 *plastiter = (tid == ((trip_count - 1)/( UT )chunk) % nth);
             break;
         }
+#if OMP_45_ENABLED
+    case kmp_sch_static_balanced_chunked:
+        {
+            register T old_upper = *pupper;
+            // round up to make sure the chunk is enough to cover all iterations
+            register UT span = (trip_count+nth-1) / nth;
+
+            // perform chunk adjustment
+            chunk = (span + chunk - 1) & ~(chunk-1);
+
+            span = chunk * incr;
+            *plower = *plower + (span * tid);
+            *pupper = *plower + span - incr;
+            if ( incr > 0 ) {
+              if ( *pupper > old_upper ) *pupper = old_upper;
+            } else
+              if ( *pupper < old_upper ) *pupper = old_upper;
+
+            if( plastiter != NULL )
+                *plastiter = ( tid == ((trip_count - 1)/( UT )chunk) );
+            break;
+        }
+#endif
     default:
         KMP_ASSERT2( 0, "__kmpc_for_static_init: unknown scheduling type" );
         break;
@@ -488,7 +485,7 @@ __kmp_dist_for_static_init(
             // Check/correct bounds if needed
             if( incr > 0 ) {
                 if( *pupperDist < *plower )
-                    *pupperDist = i_maxmin< T >::mx;
+                    *pupperDist = traits_t<T>::max_value;
                 if( plastiter != NULL )
                     *plastiter = *plower <= upper && *pupperDist > upper - incr;
                 if( *pupperDist > upper )
@@ -499,7 +496,7 @@ __kmp_dist_for_static_init(
                 }
             } else {
                 if( *pupperDist > *plower )
-                    *pupperDist = i_maxmin< T >::mn;
+                    *pupperDist = traits_t<T>::min_value;
                 if( plastiter != NULL )
                     *plastiter = *plower >= upper && *pupperDist < upper - incr;
                 if( *pupperDist < upper )
@@ -557,7 +554,7 @@ __kmp_dist_for_static_init(
                     *pupper = *plower + chunk_inc_count - incr;
                     if( incr > 0 ) {
                         if( *pupper < *plower )
-                            *pupper = i_maxmin< T >::mx;
+                            *pupper = traits_t<T>::max_value;
                         if( plastiter != NULL )
                             if( *plastiter != 0 && !(*plower <= upper && *pupper > upper - incr) )
                                 *plastiter = 0;
@@ -565,7 +562,7 @@ __kmp_dist_for_static_init(
                             *pupper = upper;//tracker C73258
                     } else {
                         if( *pupper > *plower )
-                            *pupper = i_maxmin< T >::mn;
+                            *pupper = traits_t<T>::min_value;
                         if( plastiter != NULL )
                             if( *plastiter != 0 && !(*plower >= upper && *pupper < upper - incr) )
                                 *plastiter = 0;
@@ -706,12 +703,12 @@ __kmp_team_static_init(
     // Correct upper bound if needed
     if( incr > 0 ) {
         if( *p_ub < *p_lb ) // overflow?
-            *p_ub = i_maxmin< T >::mx;
+            *p_ub = traits_t<T>::max_value;
         if( *p_ub > upper )
             *p_ub = upper; // tracker C73258
     } else {   // incr < 0
         if( *p_ub > *p_lb )
-            *p_ub = i_maxmin< T >::mn;
+            *p_ub = traits_t<T>::min_value;
         if( *p_ub < upper )
             *p_ub = upper; // tracker C73258
     }

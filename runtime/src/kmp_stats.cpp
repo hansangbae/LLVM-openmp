@@ -29,11 +29,11 @@
 #define expandName(name,flags,ignore)  {STRINGIZE(name),flags},
 statInfo timeStat::timerInfo[] = {
     KMP_FOREACH_TIMER(expandName,0)
-    {0,0}
+    {"TIMER_LAST", 0}
 };
 const statInfo counter::counterInfo[] = {
     KMP_FOREACH_COUNTER(expandName,0)
-    {0,0}
+    {"COUNTER_LAST", 0}
 };
 #undef expandName
 
@@ -71,7 +71,7 @@ const kmp_stats_output_module::rgb_color kmp_stats_output_module::globalColorArr
 static uint32_t statsPrinted = 0;
 
 // output interface
-static kmp_stats_output_module __kmp_stats_global_output;
+static kmp_stats_output_module* __kmp_stats_global_output = NULL;
 
 /* ****************************************************** */
 /* ************* statistic member functions ************* */
@@ -157,29 +157,100 @@ std::string statistic::format(char unit, bool total) const
 
 void explicitTimer::start(timer_e timerEnumValue) {
     startTime = tsc_tick_count::now();
+    totalPauseTime = 0;
     if(timeStat::logEvent(timerEnumValue)) {
         __kmp_stats_thread_ptr->incrementNestValue();
     }
     return;
 }
 
-void explicitTimer::stop(timer_e timerEnumValue) {
+void explicitTimer::stop(timer_e timerEnumValue, kmp_stats_list* stats_ptr /* = nullptr */) {
     if (startTime.getValue() == 0)
         return;
 
     tsc_tick_count finishTime = tsc_tick_count::now();
 
     //stat->addSample ((tsc_tick_count::now() - startTime).ticks());
-    stat->addSample ((finishTime - startTime).ticks());
+    stat->addSample(((finishTime - startTime) - totalPauseTime).ticks());
 
     if(timeStat::logEvent(timerEnumValue)) {
-        __kmp_stats_thread_ptr->push_event(startTime.getValue() - __kmp_stats_start_time.getValue(), finishTime.getValue() - __kmp_stats_start_time.getValue(), __kmp_stats_thread_ptr->getNestValue(), timerEnumValue);
-        __kmp_stats_thread_ptr->decrementNestValue();
+        if(!stats_ptr)
+            stats_ptr = __kmp_stats_thread_ptr;
+        stats_ptr->push_event(startTime.getValue() - __kmp_stats_start_time.getValue(), finishTime.getValue() - __kmp_stats_start_time.getValue(), __kmp_stats_thread_ptr->getNestValue(), timerEnumValue);
+        stats_ptr->decrementNestValue();
     }
 
     /* We accept the risk that we drop a sample because it really did start at t==0. */
     startTime = 0;
     return;
+}
+
+/* ************************************************************** */
+/* ************* partitionedTimers member functions ************* */
+partitionedTimers::partitionedTimers() {
+    timer_stack.reserve(8);
+}
+
+// add a timer to this collection of partitioned timers.
+void partitionedTimers::add_timer(explicit_timer_e timer_index, explicitTimer* timer_pointer) {
+    KMP_DEBUG_ASSERT((int)timer_index < (int)EXPLICIT_TIMER_LAST+1);
+    timers[timer_index] = timer_pointer;
+}
+
+// initialize the paritioned timers to an initial timer
+void partitionedTimers::init(timerPair init_timer_pair) {
+    KMP_DEBUG_ASSERT(this->timer_stack.size() == 0);
+    timer_stack.push_back(init_timer_pair);
+    timers[init_timer_pair.get_index()]->start(init_timer_pair.get_timer());
+}
+
+// stop/save the current timer, and start the new timer (timer_pair)
+// There is a special condition where if the current timer is equal to
+// the one you are trying to push, then it only manipulates the stack,
+// and it won't stop/start the currently running timer.
+void partitionedTimers::push(timerPair timer_pair) {
+    // get the current timer
+    // stop current timer
+    // push new timer
+    // start the new timer
+    KMP_DEBUG_ASSERT(this->timer_stack.size() > 0);
+    timerPair current_timer = timer_stack.back();
+    timer_stack.push_back(timer_pair);
+    if(current_timer != timer_pair) {
+        timers[current_timer.get_index()]->pause();
+        timers[timer_pair.get_index()]->start(timer_pair.get_timer());
+    }
+}
+
+// stop/discard the current timer, and start the previously saved timer
+void partitionedTimers::pop() {
+    // get the current timer
+    // stop current timer
+    // pop current timer
+    // get the new current timer and start it back up
+    KMP_DEBUG_ASSERT(this->timer_stack.size() > 1);
+    timerPair current_timer = timer_stack.back();
+    timer_stack.pop_back();
+    timerPair new_timer = timer_stack.back();
+    if(current_timer != new_timer) {
+        timers[current_timer.get_index()]->stop(current_timer.get_timer());
+        timers[new_timer.get_index()]->resume();
+    }
+}
+
+// Wind up all the currently running timers.
+// This pops off all the timers from the stack and clears the stack
+// After this is called, init() must be run again to initialize the
+// stack of timers
+void partitionedTimers::windup() {
+    while(timer_stack.size() > 1) {
+        this->pop();
+    }
+    if(timer_stack.size() > 0) {
+        timerPair last_timer = timer_stack.back();
+        timer_stack.pop_back();
+        timers[last_timer.get_index()]->stop(last_timer.get_timer());
+    }
 }
 
 /* ******************************************************************* */
@@ -287,7 +358,6 @@ kmp_stats_list* kmp_stats_list::iterator::operator*() const {
 /* *************************************************************** */
 /* *************  kmp_stats_output_module functions ************** */
 
-const char* kmp_stats_output_module::outputFileName = NULL;
 const char* kmp_stats_output_module::eventsFileName = NULL;
 const char* kmp_stats_output_module::plotFileName   = NULL;
 int kmp_stats_output_module::printPerThreadFlag       = 0;
@@ -303,7 +373,24 @@ void kmp_stats_output_module::init()
     char * threadEvents   = getenv("KMP_STATS_EVENTS");
 
     // set the stats output filenames based on environment variables and defaults
-    outputFileName = statsFileName;
+    if(statsFileName) {
+        // append the process id to the output filename
+        // events.csv --> events-pid.csv
+        size_t index;
+        std::string baseFileName, pid, suffix;
+        std::stringstream ss;
+        outputFileName = std::string(statsFileName);
+        index = outputFileName.find_last_of('.');
+        if(index == std::string::npos) {
+            baseFileName = outputFileName;
+        } else {
+            baseFileName = outputFileName.substr(0, index);
+            suffix = outputFileName.substr(index);
+        }
+        ss << getpid();
+        pid = ss.str();
+        outputFileName = baseFileName + "-" + pid + suffix;
+    }
     eventsFileName = eventsFileName ? eventsFileName : "events.dat";
     plotFileName   = plotFileName   ? plotFileName   : "events.plt";
 
@@ -396,16 +483,18 @@ void kmp_stats_output_module::windupExplicitTimers()
     // and say "it's over".
     // If the timer wasn't running, this won't record anything anyway.
     kmp_stats_list::iterator it;
-    for(it = __kmp_stats_list.begin(); it != __kmp_stats_list.end(); it++) {
+    for(it = __kmp_stats_list->begin(); it != __kmp_stats_list->end(); it++) {
+        kmp_stats_list* ptr = *it;
+        ptr->getPartitionedTimers()->windup();
         for (int timer=0; timer<EXPLICIT_TIMER_LAST; timer++) {
-            (*it)->getExplicitTimer(explicit_timer_e(timer))->stop((timer_e)timer);
+            ptr->getExplicitTimer(explicit_timer_e(timer))->stop((timer_e)timer, ptr);
         }
     }
 }
 
 void kmp_stats_output_module::printPloticusFile() {
     int i;
-    int size = __kmp_stats_list.size();
+    int size = __kmp_stats_list->size();
     FILE* plotOut = fopen(plotFileName, "w+");
 
     fprintf(plotOut, "#proc page\n"
@@ -502,7 +591,7 @@ void kmp_stats_output_module::outputStats(const char* heading)
     statistic totalStats[TIMER_LAST];           /* Synthesized, cross threads versions of normal timer stats */
     statistic allCounters[COUNTER_LAST];
 
-    FILE * statsOut = outputFileName ? fopen (outputFileName, "a+") : stderr;
+    FILE * statsOut = !outputFileName.empty() ? fopen (outputFileName.c_str(), "a+") : stderr;
     if (!statsOut)
         statsOut = stderr;
 
@@ -515,7 +604,7 @@ void kmp_stats_output_module::outputStats(const char* heading)
     fprintf(statsOut, "%s\n",heading);
     // Accumulate across threads.
     kmp_stats_list::iterator it;
-    for (it = __kmp_stats_list.begin(); it != __kmp_stats_list.end(); it++) {
+    for (it = __kmp_stats_list->begin(); it != __kmp_stats_list->end(); it++) {
         int t = (*it)->getGtid();
         // Output per thread stats if requested.
         if (printPerThreadFlag) {
@@ -579,7 +668,7 @@ extern "C" {
 void __kmp_reset_stats()
 {
     kmp_stats_list::iterator it;
-    for(it = __kmp_stats_list.begin(); it != __kmp_stats_list.end(); it++) {
+    for(it = __kmp_stats_list->begin(); it != __kmp_stats_list->end(); it++) {
         timeStat * timers     = (*it)->getTimers();
         counter * counters    = (*it)->getCounters();
         explicitTimer * eTimers = (*it)->getExplicitTimers();
@@ -595,17 +684,13 @@ void __kmp_reset_stats()
 
         // reset the event vector so all previous events are "erased"
         (*it)->resetEventVector();
-
-        // May need to restart the explicit timers in thread zero?
     }
-    KMP_START_EXPLICIT_TIMER(OMP_serial);
-    KMP_START_EXPLICIT_TIMER(OMP_start_end);
 }
 
 // This function will reset all stats and stop all threads' explicit timers if they haven't been stopped already.
 void __kmp_output_stats(const char * heading)
 {
-    __kmp_stats_global_output.outputStats(heading);
+    __kmp_stats_global_output->outputStats(heading);
     __kmp_reset_stats();
 }
 
@@ -620,6 +705,18 @@ void __kmp_accumulate_stats_at_exit(void)
 
 void __kmp_stats_init(void)
 {
+    __kmp_init_tas_lock( & __kmp_stats_lock );
+    __kmp_stats_start_time = tsc_tick_count::now();
+    __kmp_stats_global_output = new kmp_stats_output_module();
+    __kmp_stats_list = new kmp_stats_list();
+}
+
+void __kmp_stats_fini(void)
+{
+    __kmp_accumulate_stats_at_exit();
+    __kmp_stats_list->deallocate();
+    delete __kmp_stats_global_output;
+    delete __kmp_stats_list;
 }
 
 } // extern "C"

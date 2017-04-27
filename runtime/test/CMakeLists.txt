@@ -1,11 +1,27 @@
 # CMakeLists.txt file for unit testing OpenMP Library
 include(FindPythonInterp)
 include(CheckTypeSize)
+include(CheckFunctionExists)
+include(CheckLibraryExists)
 
 if(NOT PYTHONINTERP_FOUND)
   libomp_warning_say("Could not find Python.")
   libomp_warning_say("The check-libomp target will not be available!")
   return()
+endif()
+
+# Some tests use math functions
+check_library_exists(m sqrt "" LIBOMP_HAVE_LIBM)
+# When using libgcc, -latomic may be needed for atomics
+# (but when using compiler-rt, the atomics will be built-in)
+# Note: we can not check for __atomic_load because clang treats it
+# as special built-in and that breaks CMake checks
+check_function_exists(__atomic_load_1 LIBOMP_HAVE_BUILTIN_ATOMIC)
+if(NOT LIBOMP_HAVE_BUILTIN_ATOMIC)
+  check_library_exists(atomic __atomic_load_1 "" LIBOMP_HAVE_LIBATOMIC)
+else()
+  # not needed
+  set(LIBOMP_HAVE_LIBATOMIC 0)
 endif()
 
 macro(pythonize_bool var)
@@ -20,6 +36,8 @@ pythonize_bool(LIBOMP_USE_HWLOC)
 pythonize_bool(LIBOMP_OMPT_SUPPORT)
 pythonize_bool(LIBOMP_OMPT_BLAME)
 pythonize_bool(LIBOMP_OMPT_TRACE)
+pythonize_bool(LIBOMP_HAVE_LIBM)
+pythonize_bool(LIBOMP_HAVE_LIBATOMIC)
 
 set(LIBOMP_TEST_CFLAGS "" CACHE STRING
   "Extra compiler flags to send to the test compiler")
@@ -35,13 +53,10 @@ if(${LIBOMP_STANDALONE_BUILD})
     "Compiler to use for testing OpenMP library")
   set(LIBOMP_TEST_OPENMP_FLAG -fopenmp CACHE STRING
     "OpenMP compiler flag to use for testing OpenMP library")
-  set(LIBOMP_LLVM_LIT_EXECUTABLE "" CACHE STRING
-    "Path to llvm-lit")
-  find_program(LIT_EXECUTABLE
-    NAMES llvm-lit
-    HINTS ${LIBOMP_LLVM_LIT_EXECUTABLE}
+  find_program(LIBOMP_LLVM_LIT_EXECUTABLE
+    NAMES llvm-lit lit.py lit
     PATHS ${OPENMP_LLVM_TOOLS_DIR})
-  if(NOT LIT_EXECUTABLE)
+  if(NOT LIBOMP_LLVM_LIT_EXECUTABLE)
     libomp_say("Cannot find llvm-lit.")
     libomp_say("Please put llvm-lit in your PATH, set LIBOMP_LLVM_LIT_EXECUTABLE to its full path or point OPENMP_LLVM_TOOLS_DIR to its directory")
     libomp_warning_say("The check-libomp target will not be available!")
@@ -66,7 +81,7 @@ if(${LIBOMP_STANDALONE_BUILD})
     "Default options for lit")
   separate_arguments(LIBOMP_LIT_ARGS)
   add_custom_target(check-libomp
-    COMMAND ${PYTHON_EXECUTABLE} ${LIT_EXECUTABLE} ${LIBOMP_LIT_ARGS} ${CMAKE_CURRENT_BINARY_DIR}
+    COMMAND ${PYTHON_EXECUTABLE} ${LIBOMP_LLVM_LIT_EXECUTABLE} ${LIBOMP_LIT_ARGS} ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS omp
     COMMENT "Running libomp tests"
     ${cmake_3_2_USES_TERMINAL}
